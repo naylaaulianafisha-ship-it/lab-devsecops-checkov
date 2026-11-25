@@ -1,0 +1,202 @@
+# =============================================================================
+# LAB DEVSECOPS - PERTEMUAN 11 (Lab 06)
+# File: .github/workflows/checkov-scan.yml
+#
+# GitHub Actions workflow untuk Checkov CI/CD pipeline
+#
+# Trigger:
+#   - Push ke branch main
+#   - Pull Request ke branch main (hanya file IaC)
+#
+# Jobs:
+#   1. checkov-terraform  - Scan konfigurasi Terraform
+#   2. checkov-kubernetes - Scan manifest Kubernetes
+#   3. checkov-dockerfile - Scan Dockerfile
+#   4. Upload SARIF ke GitHub Security tab
+# =============================================================================
+
+name: "🔐 IaC Security Scan dengan Checkov"
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "terraform/**"
+      - "kubernetes/**"
+      - "dockerfile/**"
+      - "custom-policy/**"
+
+permissions:
+  contents: read
+  security-events: write   # Untuk upload SARIF ke GitHub Security tab
+  actions: read
+  pull-requests: write     # Untuk posting komentar di PR
+
+jobs:
+  # ─────────────────────────────────────────────────────────────
+  # JOB 1: Scan Terraform
+  # ─────────────────────────────────────────────────────────────
+  checkov-terraform:
+    name: "🏗️ Terraform Security Scan"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: "📥 Checkout repository"
+        uses: actions/checkout@v4
+
+      - name: "🔍 Run Checkov - Terraform"
+        id: checkov-tf
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: terraform/
+          framework: terraform
+          output_format: sarif
+          output_file_path: checkov-terraform.sarif
+          soft_fail: false          # Pipeline GAGAL jika ada temuan
+          check_threshold: HIGH     # Hanya gagal untuk HIGH dan CRITICAL
+          # skip_check: CKV_AWS_18  # Uncomment untuk skip check tertentu
+        continue-on-error: true     # Lanjutkan agar bisa upload SARIF
+
+      - name: "📊 Upload Terraform SARIF ke GitHub Security"
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: checkov-terraform.sarif
+          category: "checkov-terraform"
+
+      - name: "❌ Blokir PR jika Terraform CRITICAL/HIGH"
+        if: steps.checkov-tf.outcome == 'failure'
+        run: |
+          echo "========================================================"
+          echo "❌ CHECKOV MENEMUKAN MASALAH CRITICAL/HIGH DI TERRAFORM!"
+          echo "========================================================"
+          echo ""
+          echo "Lihat detail di:"
+          echo "  → Tab 'Security' → 'Code scanning alerts' di repository"
+          echo "  → Logs di atas (checkov-terraform step)"
+          echo ""
+          echo "Perbaiki temuan sebelum merge PR!"
+          exit 1
+
+      - name: "✅ Terraform scan berhasil"
+        if: steps.checkov-tf.outcome == 'success'
+        run: |
+          echo "✅ Semua check Terraform PASSED!"
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 2: Scan Kubernetes
+  # ─────────────────────────────────────────────────────────────
+  checkov-kubernetes:
+    name: "☸️  Kubernetes Security Scan"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: "📥 Checkout repository"
+        uses: actions/checkout@v4
+
+      - name: "🔍 Run Checkov - Kubernetes"
+        id: checkov-k8s
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: kubernetes/
+          framework: kubernetes
+          output_format: sarif
+          output_file_path: checkov-k8s.sarif
+          soft_fail: true           # Kubernetes: warning only (tidak blokir)
+        continue-on-error: true
+
+      - name: "📊 Upload K8s SARIF ke GitHub Security"
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: checkov-k8s.sarif
+          category: "checkov-kubernetes"
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 3: Scan Dockerfile
+  # ─────────────────────────────────────────────────────────────
+  checkov-dockerfile:
+    name: "🐳 Dockerfile Security Scan"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: "📥 Checkout repository"
+        uses: actions/checkout@v4
+
+      - name: "🔍 Run Checkov - Dockerfile"
+        id: checkov-docker
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: dockerfile/
+          framework: dockerfile
+          output_format: sarif
+          output_file_path: checkov-dockerfile.sarif
+          soft_fail: true           # Dockerfile: warning only
+        continue-on-error: true
+
+      - name: "📊 Upload Dockerfile SARIF ke GitHub Security"
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: checkov-dockerfile.sarif
+          category: "checkov-dockerfile"
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 4: Ringkasan hasil scan (komentar di PR)
+  # ─────────────────────────────────────────────────────────────
+  scan-summary:
+    name: "📋 Posting Ringkasan ke PR"
+    runs-on: ubuntu-latest
+    needs: [checkov-terraform, checkov-kubernetes, checkov-dockerfile]
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: "📥 Checkout repository"
+        uses: actions/checkout@v4
+
+      - name: "🐍 Install Checkov"
+        run: pip3 install checkov
+
+      - name: "🔍 Run all scans untuk ringkasan"
+        run: |
+          echo "## 🔐 Checkov Security Scan Results" > scan-summary.md
+          echo "" >> scan-summary.md
+          echo "| Framework | PASSED | FAILED | SKIPPED |" >> scan-summary.md
+          echo "|-----------|--------|--------|---------|" >> scan-summary.md
+
+          # Terraform
+          TF_RESULT=$(checkov -d terraform/ -o json 2>/dev/null || echo '{"summary":{"passed":0,"failed":0,"skipped":0}}')
+          TF_PASS=$(echo "$TF_RESULT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['summary']['passed'])" 2>/dev/null || echo "N/A")
+          TF_FAIL=$(echo "$TF_RESULT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['summary']['failed'])" 2>/dev/null || echo "N/A")
+          TF_SKIP=$(echo "$TF_RESULT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['summary']['skipped'])" 2>/dev/null || echo "N/A")
+          echo "| Terraform | ✅ $TF_PASS | ❌ $TF_FAIL | ⏭️  $TF_SKIP |" >> scan-summary.md
+
+          # Kubernetes
+          K8S_RESULT=$(checkov -d kubernetes/ --framework kubernetes -o json 2>/dev/null || echo '{"summary":{"passed":0,"failed":0,"skipped":0}}')
+          K8S_PASS=$(echo "$K8S_RESULT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['summary']['passed'])" 2>/dev/null || echo "N/A")
+          K8S_FAIL=$(echo "$K8S_RESULT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['summary']['failed'])" 2>/dev/null || echo "N/A")
+          K8S_SKIP=$(echo "$K8S_RESULT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['summary']['skipped'])" 2>/dev/null || echo "N/A")
+          echo "| Kubernetes | ✅ $K8S_PASS | ❌ $K8S_FAIL | ⏭️  $K8S_SKIP |" >> scan-summary.md
+
+          # Dockerfile
+          DF_RESULT=$(checkov -d dockerfile/ --framework dockerfile -o json 2>/dev/null || echo '{"summary":{"passed":0,"failed":0,"skipped":0}}')
+          DF_PASS=$(echo "$DF_RESULT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['summary']['passed'])" 2>/dev/null || echo "N/A")
+          DF_FAIL=$(echo "$DF_RESULT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['summary']['failed'])" 2>/dev/null || echo "N/A")
+          DF_SKIP=$(echo "$DF_RESULT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['summary']['skipped'])" 2>/dev/null || echo "N/A")
+          echo "| Dockerfile | ✅ $DF_PASS | ❌ $DF_FAIL | ⏭️  $DF_SKIP |" >> scan-summary.md
+
+          echo "" >> scan-summary.md
+          echo "> 🔗 Detail lengkap: **Security → Code scanning alerts**" >> scan-summary.md
+
+          cat scan-summary.md
+
+      - name: "💬 Post komentar ringkasan ke PR"
+        uses: thollander/actions-comment-pull-request@v2
+        with:
+          filePath: scan-summary.md
+          comment_tag: checkov-summary

@@ -1,0 +1,5 @@
+.venv/
+hasil-*.txt
+hasil-*.json
+k8s-*.json
+df-*.json
